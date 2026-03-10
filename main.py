@@ -5,17 +5,16 @@ from telegram.ext import (
     MessageHandler, filters, ConversationHandler, ContextTypes
 )
 import datetime
-import uuid
 
 # ============================================
 # ДАННЫЕ УЖЕ ВСТАВЛЕНЫ - НИЧЕГО НЕ МЕНЯЙ!
 # ============================================
 
-# Токен бота (уже твой)
+# Токен бота
 BOT_TOKEN = "8548246370:AAEYqEVTSdslgQNQPAqo6xh_PEcbnRajt6M"
 
-# Твой Telegram ID (уже вставлен)
-ADMIN_IDS = [6979197416]  # Если нужно добавить ещё, напиши через запятую: [6979197416, 123456789]
+# Твой Telegram ID
+ADMIN_IDS = [6979197416]
 
 # ============================================
 # СОСТОЯНИЯ ДЛЯ ДИАЛОГОВ
@@ -35,12 +34,11 @@ CATEGORIES = {
 }
 
 # ============================================
-# ВРЕМЕННОЕ ХРАНИЛИЩЕ (вместо базы данных)
+# ВРЕМЕННОЕ ХРАНИЛИЩЕ
 # ============================================
 users_db = {}
 tickets_db = {}
 ticket_counter = 0
-ticket_messages = {}
 
 # ============================================
 # ЛОГИРОВАНИЕ
@@ -65,7 +63,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'username': user.username,
         'first_name': user.first_name,
         'last_name': user.last_name,
-        'registered_at': datetime.datetime.now().isoformat()
+        'registered_at': datetime.datetime.now().strftime('%d.%m.%Y %H:%M')
     }
     
     # Создаём клавиатуру
@@ -95,6 +93,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    # Главное меню
     if query.data == "new_ticket":
         # Показываем категории
         keyboard = []
@@ -106,7 +105,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📋 Выбери категорию обращения:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return CATEGORY
         
     elif query.data == "my_tickets":
         await show_user_tickets(update, context)
@@ -134,7 +132,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_list_open(update, context)
         
     elif query.data.startswith("cat_"):
-        # Сохраняем выбранную категорию
+        # Выбрана категория - запрашиваем описание
         cat_key = query.data.replace("cat_", "")
         context.user_data['ticket_category'] = CATEGORIES[cat_key]
         
@@ -147,10 +145,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Отправь описание одним сообщением:",
             parse_mode='Markdown'
         )
-        return DESCRIPTION
+        return DESCRIPTION  # Переходим в состояние DESCRIPTION
         
     elif query.data.startswith("ticket_"):
-        # Просмотр конкретного обращения
         ticket_id = int(query.data.replace("ticket_", ""))
         await show_ticket_details(update, context, ticket_id)
         
@@ -169,6 +166,85 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("admin_reject_"):
         ticket_id = int(query.data.replace("admin_reject_", ""))
         await admin_reject_ticket(update, context, ticket_id)
+    
+    return ConversationHandler.END  # По умолчанию завершаем диалог
+
+async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получает описание обращения"""
+    description = update.message.text
+    context.user_data['ticket_description'] = description
+    
+    await update.message.reply_text(
+        "📎 Пришли ссылки на доказательства (скриншоты, видео) или напиши 'нет', если доказательств нет:"
+    )
+    return PROOF  # Переходим в состояние PROOF
+
+async def receive_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получает доказательства и создаёт обращение"""
+    global ticket_counter
+    
+    proof = update.message.text
+    if proof.lower() == 'нет':
+        proof = ''
+    
+    user = update.effective_user
+    
+    # Создаём обращение
+    ticket_counter += 1
+    ticket_id = ticket_counter
+    
+    # Генерируем номер обращения
+    date_str = datetime.datetime.now().strftime('%Y%m%d')
+    ticket_number = f"LS-{date_str}-{ticket_id:04d}"
+    
+    tickets_db[ticket_id] = {
+        'id': ticket_id,
+        'number': ticket_number,
+        'user_id': user.id,
+        'category': context.user_data['ticket_category'],
+        'description': context.user_data['ticket_description'],
+        'proof': proof,
+        'status': 'open',
+        'created_at': datetime.datetime.now().strftime('%d.%m.%Y %H:%M'),
+        'admin_reply': None
+    }
+    
+    # Отправляем уведомление админам
+    for admin_id in ADMIN_IDS:
+        try:
+            keyboard = [[InlineKeyboardButton(
+                "📋 Посмотреть обращение", 
+                callback_data=f"admin_ticket_{ticket_id}"
+            )]]
+            
+            await context.bot.send_message(
+                admin_id,
+                f"🆕 **Новое обращение!**\n\n"
+                f"📋 Номер: #{ticket_number}\n"
+                f"👤 От: {user.full_name} (@{user.username})\n"
+                f"📌 Категория: {tickets_db[ticket_id]['category']}\n"
+                f"📝 Описание: {tickets_db[ticket_id]['description'][:100]}...\n",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки админу {admin_id}: {e}")
+    
+    # Очищаем временные данные
+    context.user_data.clear()
+    
+    await update.message.reply_text(
+        f"✅ **Обращение создано!**\n\n"
+        f"Номер: #{ticket_number}\n"
+        f"Категория: {tickets_db[ticket_id]['category']}\n\n"
+        f"Администратор ответит в ближайшее время. Ты получишь уведомление.",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ В главное меню", callback_data="back_to_main")
+        ]])
+    )
+    
+    return ConversationHandler.END  # Завершаем диалог
 
 async def show_user_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список обращений пользователя"""
@@ -262,83 +338,6 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Главное меню. Выбери действие:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получает описание обращения"""
-    description = update.message.text
-    context.user_data['ticket_description'] = description
-    
-    await update.message.reply_text(
-        "📎 Пришли ссылки на доказательства (скриншоты, видео) или напиши 'нет', если доказательств нет:"
-    )
-    return PROOF
-
-async def receive_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получает доказательства и создаёт обращение"""
-    global ticket_counter
-    
-    proof = update.message.text
-    if proof.lower() == 'нет':
-        proof = ''
-    
-    user = update.effective_user
-    
-    # Создаём обращение
-    ticket_counter += 1
-    ticket_id = ticket_counter
-    
-    # Генерируем номер обращения
-    date_str = datetime.datetime.now().strftime('%Y%m%d')
-    ticket_number = f"LS-{date_str}-{ticket_id:04d}"
-    
-    tickets_db[ticket_id] = {
-        'id': ticket_id,
-        'number': ticket_number,
-        'user_id': user.id,
-        'category': context.user_data['ticket_category'],
-        'description': context.user_data['ticket_description'],
-        'proof': proof,
-        'status': 'open',
-        'created_at': datetime.datetime.now().strftime('%d.%m.%Y %H:%M'),
-        'messages': []
-    }
-    
-    # Отправляем уведомление админам
-    for admin_id in ADMIN_IDS:
-        try:
-            keyboard = [[InlineKeyboardButton(
-                "📋 Посмотреть обращение", 
-                callback_data=f"admin_ticket_{ticket_id}"
-            )]]
-            
-            await context.bot.send_message(
-                admin_id,
-                f"🆕 **Новое обращение!**\n\n"
-                f"📋 Номер: #{ticket_number}\n"
-                f"👤 От: {user.full_name} (@{user.username})\n"
-                f"📌 Категория: {tickets_db[ticket_id]['category']}\n"
-                f"📝 Описание: {tickets_db[ticket_id]['description'][:100]}...\n",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except:
-            pass
-    
-    # Очищаем временные данные
-    context.user_data.clear()
-    
-    await update.message.reply_text(
-        f"✅ **Обращение создано!**\n\n"
-        f"Номер: #{ticket_number}\n"
-        f"Категория: {tickets_db[ticket_id]['category']}\n\n"
-        f"Администратор ответит в ближайшее время. Ты получишь уведомление.",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ В главное меню", callback_data="back_to_main")
-        ]])
-    )
-    
-    return ConversationHandler.END
 
 # ============================================
 # АДМИН-ФУНКЦИИ
@@ -450,8 +449,6 @@ async def admin_ticket_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
     if ticket['status'] == 'open':
         keyboard.append([InlineKeyboardButton("✅ Взять в работу", callback_data=f"admin_take_{ticket_id}")])
     
-    keyboard.append([InlineKeyboardButton("💬 Ответить", callback_data=f"admin_reply_{ticket_id}")])
-    
     if ticket['status'] != 'closed':
         keyboard.append([InlineKeyboardButton("🔒 Закрыть", callback_data=f"admin_close_{ticket_id}")])
         keyboard.append([InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject_{ticket_id}")])
@@ -555,20 +552,19 @@ def main():
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start))
     
-    # Обработчик нажатий на кнопки (основной)
-    application.add_handler(CallbackQueryHandler(button_callback))
-    
     # ConversationHandler для создания обращения
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern="^new_ticket$")],
+        entry_points=[CallbackQueryHandler(button_callback, pattern="^cat_")],
         states={
-            CATEGORY: [CallbackQueryHandler(button_callback, pattern="^cat_")],
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_description)],
             PROOF: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_proof)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(conv_handler)
+    
+    # Обработчик всех остальных callback-запросов
+    application.add_handler(CallbackQueryHandler(button_callback))
     
     # Обработчик ошибок
     application.add_error_handler(error_handler)
