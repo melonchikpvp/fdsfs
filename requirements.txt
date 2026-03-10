@@ -1,0 +1,8 @@
+python-telegram-bot==20.7
+sqlalchemy==2.0.23
+alembic==1.12.1
+python-dotenv==1.0.0
+psycopg2-binary==2.9.9
+Flask==3.0.0
+gunicorn==21.2.0
+pytz==2023.3
